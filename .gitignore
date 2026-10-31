@@ -1,0 +1,44 @@
+# ---- 构建产物（STM32 / GCC / Keil / IAR）----
+build/
+Debug/
+Release/
+*.o
+*.d
+*.su
+*.elf
+*.bin
+*.hex
+*.map
+*.axf
+*.lst
+*.crf
+*.lnp
+*.dep
+*.iex
+*.sct
+*.uvguix.*
+*.uvoptx
+*.uvprojx.bak
+
+# ---- IDE ----
+.vscode/
+.idea/
+.mxproject
+*.ioc.bak
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ---- 测试数据（原始 CSV 太大，只把摘要写进 docs/records/*.md）----
+*.csv
+*.trc
+*.blf
+!docs/records/*.md
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
+desktop.ini
