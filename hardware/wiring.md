@@ -63,3 +63,27 @@ SN65HVD230 模块（3.3 V）与 STM32F103 的连接：
 - 用**双绞线**（CANH/CANL 绞在一起），不要用两根分开的杜邦线拉长距离
 - 台面测试 20 cm 以内影响不大，但**压测 72 h 建议换双绞线**
 - 网线（超五类）拆一对出来正好：一对绞线 = CANH + CANL，另一对接地
+
+## 6. 实拍记录
+
+2026-11-04，第一次在 PCAN-View 上收到 `0x201` 帧当天的实物接线。
+
+**整体**：STM32F103CBT6 + SN65HVD230 + PCAN-USB 分析仪
+
+![整体接线](../docs/images/wiring-20261104-overview.jpg)
+
+**分析仪端子**：红色 `120R` 开关拨在 ON 一侧
+
+![分析仪端子](../docs/images/wiring-20261104-terminal.jpg)
+
+**收发器模块**：丝印 `3.3V / GND / RX / TX`
+
+![收发器模块](../docs/images/wiring-20261104-module.jpg)
+
+**MCU 侧**：PA12 → 模块 `TX`，PA11 → 模块 `RX`，3V3 → `3.3V`，GND → `GND`
+
+![MCU 引脚](../docs/images/wiring-20261104-board.jpg)
+
+> 命名容易搞混：模块上的 `TX/RX` 是收发器自己的 TXD（输入）/ RXD（输出），
+> 所以 MCU 的 `CAN_TX`(PA12) 接模块 `TX`、`CAN_RX`(PA11) 接模块 `RX`，
+> **同名对同名，不交叉**。交叉是 UART 的习惯，CAN 收发器不适用。
