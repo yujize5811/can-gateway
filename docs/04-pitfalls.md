@@ -92,7 +92,33 @@ CANL ──┴──────────────┴── CANL
 - **修复**：改用 **SN65HVD230**（3.3 V 供电，输出 3.3 V），与 MCU 电平天然匹配。
 
 **顺带结论**：F103 的 PA11/PA12 恰好是 USB 引脚，标注为 FT（5 V 容忍），所以这两根能接 5 V。**但换成别的引脚就会烧**，不要凭「试过一次没事」就下结论。
+## 2026-11-04 CubeMX 默认 No Debug，烧一次就锁死
 
+### 现象
+第一块板子下载成功后，之后怎么连都是 `No target connected`。
+换同批次的新板子，第一次能烧，烧完同样连不上。
+
+### 排查过程
+- 换板子 → 新板第一次成功、第二次失败 → 排除板子坏
+- 换杜邦线、换 USB 口、把 SWD 时钟从 10 MHz 降到 200 kHz → 无效
+- `Connect` 从 `under Reset` 改回 `Normal` → 报错变成 `Could not stop Cortex-M device`
+- 按住 RST 再点下载 → 还是这个错（复位期间核心停着，halt 不进去）
+- 拆开生成代码：`Core/Src/stm32f1xx_hal_msp.c:76` 是 `__HAL_AFIO_REMAP_SWJ_DISABLE();`
+
+### 根因
+CubeMX 新建工程时 `System Core → SYS → Debug` 默认是 `No Debug`。
+生成的 `HAL_MspInit()` 会把 PA13/PA14 从 SWD 改成普通 IO。
+`HAL_Init()` 是 `main()` 的第一行，所以上电约 4 µs 后 SWD 就被关掉。
+
+第一次能烧，是因为芯片是空的，没有程序去关它。
+
+### 修复
+- `.ioc` 里 SYS Debug 改成 `Serial Wire`
+- 生成后确认那句变成 `__HAL_AFIO_REMAP_SWJ_NOJTAG();`
+- 已经被锁的芯片：按住 BOOT0 → 按 NRST → 松手，进 bootloader 后下载
+
+### 代价
+一整个上午，外加一度怀疑三块板子全坏。
 ---
 
 ## 待填
