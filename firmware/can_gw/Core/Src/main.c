@@ -33,7 +33,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+/* 节点 ID：A 板 = 0x201，B 板 = 0x202。
+ * 两块板烧同一份代码，只改这一个数字。 */
+#define NODE_ID   0x201u
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -89,17 +91,50 @@ int main(void)
   MX_GPIO_Init();
   MX_CAN_Init();
   /* USER CODE BEGIN 2 */
+/* ① 过滤器：必须在 Start 之前配置。
+ *    HAL_CAN_ConfigFilter 会先进入 Init 模式再退出，
+ *    已经 Start 过再调会返回错误、卡死在 Error_Handler。
+ *    掩码全 0 = 不筛，全部接收。 */
+CAN_FilterTypeDef canFilter;
+canFilter.FilterBank           = 0;
+canFilter.FilterMode           = CAN_FILTERMODE_IDMASK;
+canFilter.FilterScale          = CAN_FILTERSCALE_32BIT;
+canFilter.FilterIdHigh         = 0x0000;
+canFilter.FilterIdLow          = 0x0000;
+canFilter.FilterMaskIdHigh     = 0x0000;
+canFilter.FilterMaskIdLow      = 0x0000;
+canFilter.FilterFIFOAssignment = CAN_RX_FIFO0;
+canFilter.FilterActivation     = ENABLE;
+canFilter.SlaveStartFilterBank = 14;
+if (HAL_CAN_ConfigFilter(&hcan, &canFilter) != HAL_OK)
+{
+    Error_Handler();
+}
+
+/* ② 启动 CAN */
 if (HAL_CAN_Start(&hcan) != HAL_OK)
 {
     Error_Handler();
 }
 
+/* ③ 板载 LED：PC13，低电平点亮 */
+__HAL_RCC_GPIOC_CLK_ENABLE();
+GPIO_InitTypeDef ledGpio = {0};
+ledGpio.Pin   = GPIO_PIN_13;
+ledGpio.Mode  = GPIO_MODE_OUTPUT_PP;
+ledGpio.Pull  = GPIO_NOPULL;
+ledGpio.Speed = GPIO_SPEED_FREQ_LOW;
+HAL_GPIO_Init(GPIOC, &ledGpio);
+
 CAN_TxHeaderTypeDef txHeader;
+CAN_RxHeaderTypeDef rxHeader;
 uint32_t txMailbox = 0;
 uint8_t  txData[8] = {0};
+uint8_t  rxData[8] = {0};
+uint8_t  rxCount = 0;   /* 收到「别人」的帧数，放进 txData[2] 作为回显 */
 uint16_t cnt = 0;
 
-txHeader.StdId = 0x201;
+txHeader.StdId = NODE_ID;
 txHeader.ExtId = 0;
 txHeader.IDE   = CAN_ID_STD;
 txHeader.RTR   = CAN_RTR_DATA;
@@ -114,8 +149,18 @@ txHeader.TransmitGlobalTime = DISABLE;
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    /* 接收：收到「别人」的帧就计数（这块板没有 LED，用回显验证） */
+    if (HAL_CAN_GetRxMessage(&hcan, CAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK)
+    {
+      if (rxHeader.StdId != NODE_ID)
+      {
+        rxCount++;
+      }
+    }
+
     txData[0] = (uint8_t)(cnt & 0xFF);
     txData[1] = (uint8_t)((cnt >> 8) & 0xFF);
+    txData[2] = rxCount;   /* 第 3 字节 = 我收到了多少帧 */
 
     if (HAL_CAN_AddTxMessage(&hcan, &txHeader, txData, &txMailbox) == HAL_OK)
     {

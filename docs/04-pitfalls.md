@@ -142,3 +142,33 @@ CubeMX 新建工程时 `System Core → SYS → Debug` 默认是 `No Debug`。
 - **修复**：更换一块新的 SN65HVD230 模块后立即恢复。旧模块已损坏（此前曾误接到 5V，SN65HVD230 是 3.3V 器件，5V 会击穿）。
 - **代价**：从 11-03 晚到 11-04 晚，约一天。
 - **教训**：SN65HVD230 只能接 3.3V，接 5V 当场击穿，而且外壳看不出来、指示灯也不亮（模块没有灯）。`cnt` 停在邮箱数量（F103 是 3）是"没有 ACK"的指纹。以后遇到"发不出去"，先看这个数，再看 CAN1->ESR 的 TEC 值：TEC 涨到 128 = 进入 error-passive，同样说明没人 ACK。
+
+---
+
+## 6. 加了接收代码后，板子"有电但不发帧"
+
+- **日期**：2026-11-09
+- **现象**：给板子加上接收功能后，PCAN-View 上这条 ID 完全消失。电源灯亮着，Build 也 0 Error，看起来一切正常。
+- **排查过程**：
+  1. 先怀疑没下载成功 → 回看 Build Output，`Build Time Elapsed: 00:00:00`，根本没重新编译（见第 7 条）。
+  2. 强制 Rebuild 后仍然不发帧。
+  3. 逐行看 `USER CODE 2` 的顺序，发现 `HAL_CAN_ConfigFilter()` 写在 `HAL_CAN_Start()` 之后。
+- **根因**：`HAL_CAN_ConfigFilter()` 内部要先让 CAN 进入 Init 模式、配完再退出。外设已经 `Start` 过再调用会返回 `HAL_ERROR`，代码走到 `Error_Handler()` 的 `while(1)` 里死循环。板子上电、灯亮、但一条指令都不再执行——**"活着但不干活"**。
+- **修复**：顺序改成 `HAL_CAN_ConfigFilter()` → `HAL_CAN_Start()`。
+- **代价**：约 40 分钟，中间误以为是板子没电、USB 口不够、杜邦线接触不良。
+- **教训**：`Error_Handler()` 是一个没有输出、没有日志的死循环。任何 `if (xxx != HAL_OK) Error_Handler();` 都在给自己埋雷。判断"程序有没有跑到 main 的 while(1)"，比判断"板子有没有坏"更值得先做。
+
+---
+
+## 7. Build Output 显示 0 Error，但 `Build Time Elapsed: 00:00:00`
+
+- **日期**：2026-11-09
+- **现象**：用外部工具改了 `main.c` 之后，Keil 里点 Build，输出 `0 Error(s), 0 Warning(s)`，看起来编译成功。但下载后现象毫无变化。
+- **排查过程**：
+  1. 反复确认代码改动位置正确。
+  2. 注意到 `Build Time Elapsed: 00:00:00`，且没有任何 `compiling xxx.c...` 行。
+  3. 关掉 Keil 重新打开工程 → Rebuild → 出现 `compiling main.c...` 与 `linking...`，耗时 3 秒，`Program Size: Code=4524`。
+- **根因**：Keil 的编辑缓冲里还是旧内容（外部修改后没有点重新加载），增量构建认为"文件没变"，直接跳过编译，把旧的 `.axf` 又链接了一遍。`0 Error` 是真的，但编译的对象是旧代码。
+- **修复**：外部改过文件后，必须 **关掉工程重开** 或确认弹窗点「是(Y)」重新加载，然后 **Rebuild**，并确认 `Build Time Elapsed` 不为 0。
+- **代价**：两次无效烧录，每次都要重新拔插 ST-Link。
+- **教训**：`0 Error` 不等于"改动能生效"。判断标准是 **有没有出现 `compiling 目标文件` 那一行**，以及 **Program Size 有没有变化**。
