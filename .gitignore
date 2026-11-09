@@ -42,3 +42,12 @@ venv/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Keil 构建产物
+firmware/*/MDK-ARM/*/*.htm
+firmware/*/MDK-ARM/*/*.lnp
+firmware/*/MDK-ARM/*/*.dep
+firmware/*/MDK-ARM/*/*.axf
+firmware/*/MDK-ARM/*/*.uvguix.*
+firmware/*/MDK-ARM/*/Objects/
+firmware/*/MDK-ARM/*/Listings/
