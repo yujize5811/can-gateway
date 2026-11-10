@@ -134,6 +134,9 @@ uint8_t  rxCount = 0;   /* 调试器观察用：等于 rxOk 的低 8 位 */
 uint16_t rxOk  = 0;     /* CRC 通过的帧数 */
 uint16_t rxErr = 0;     /* CRC 失败的帧数 */
 uint8_t  seq   = 0;     /* 发送序号，0~255 循环 */
+uint8_t  lastSeq = 0;   /* 上一次收到的对方 seq，用于算丢帧 */
+uint16_t lostCnt = 0;   /* 累计丢帧数（按 seq 缺口推算） */
+uint16_t reSync  = 0;   /* 对方重启/大跳变次数，不计入丢帧 */
 uint8_t  payload[5] = {0};
 uint8_t  txBuf[8]   = {0};
 uint16_t cnt = 0;
@@ -153,14 +156,44 @@ txHeader.TransmitGlobalTime = DISABLE;
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* ---- 接收：CRC 校验 + 计数 ---- */
-    if (HAL_CAN_GetRxMessage(&hcan, CAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK)
+    /* ---- 接收：CRC 校验 + 计数 ----
+     * 用 while 而不是 if：一轮里把 FIFO 中所有待处理的帧全部取完。
+     * FIFO 只有 3 级深，如果每轮只取 1 帧，一旦某轮被发送阻塞拖长
+     * （仲裁失败重发、HAL_Delay 抖动），就会溢出丢帧。 */
+    while (HAL_CAN_GetRxMessage(&hcan, CAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK)
     {
       if (rxHeader.StdId != NODE_ID)
       {
         if (cangw_check(rxData))
         {
           rxOk++;          /* 校验通过 */
+
+          /* ---- 丢帧检测：看序号缺口 ----
+           * seq 是 uint8_t，0~255 循环。gap = 本次 - 上次 - 1：
+           *   gap == 0   → 连续，正常
+           *   gap < 128  → 中间缺了 gap 帧（真丢帧）
+           *   gap >= 128 → 说明对方重启了（序号回到小值），
+           *                不是丢帧，只重新对齐，不计入。
+           * 用无符号减法自动处理 255→0 的回绕。 */
+          {
+            uint8_t s   = rxData[1];
+            uint8_t gap = (uint8_t)(s - lastSeq - 1u);
+
+            if (gap == 0u)
+            {
+              /* 连续，什么都不用做 */
+            }
+            else if (gap < 128u)
+            {
+              lostCnt += gap;
+            }
+            else
+            {
+              reSync++;
+            }
+
+            lastSeq = s;
+          }
         }
         else
         {
@@ -170,19 +203,30 @@ txHeader.TransmitGlobalTime = DISABLE;
     }
     rxCount = (uint8_t)rxOk;
 
-    /* ---- 发送：组帧 ---- */
+    /* ---- 发送：组帧 ----
+     * 帧布局（8 字节）：
+     *   [0] type
+     *   [1] seq
+     *   [2][3] 发送计数 cnt（16 位，低字节在前）
+     *   [4][5] 丢帧计数 lostCnt（16 位，低字节在前）
+     *   [6]    CRC 失败计数 rxErr（低 8 位，正常情况下恒为 0）
+     *   [7]    CRC8
+     * 上一版把 rxOk 和 lostCnt 都压成 8 位，超过 255 会回绕，
+     * 只能看"变没变"、看不出"是多少"，所以改成 16 位。 */
     payload[0] = (uint8_t)(cnt & 0xFF);
     payload[1] = (uint8_t)((cnt >> 8) & 0xFF);
-    payload[2] = (uint8_t)rxOk;
-    payload[3] = (uint8_t)rxErr;   /* 正常情况下应该一直是 0 */
-    payload[4] = 0;
+    payload[2] = (uint8_t)(lostCnt & 0xFF);
+    payload[3] = (uint8_t)((lostCnt >> 8) & 0xFF);
+    payload[4] = (uint8_t)rxErr;   /* 正常情况下应该一直是 0 */
 
     cangw_pack(txBuf, CANGW_TYPE_DATA, seq, payload);
-    seq++;
 
     if (HAL_CAN_AddTxMessage(&hcan, &txHeader, txBuf, &txMailbox) == HAL_OK)
     {
       cnt++;
+      seq++;      /* 只有真正发出去的帧才占用序号。
+                   * 否则发送失败时 seq 空跳，对端会算成漏帧——
+                   * 这叫"幻影丢帧"，是自己制造的假故障。 */
     }
 
     HAL_Delay(20);   /* 20 ms = 50 帧/秒 */
