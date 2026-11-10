@@ -23,7 +23,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "can_proto.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -35,7 +35,7 @@
 /* USER CODE BEGIN PD */
 /* 节点 ID：A 板 = 0x201，B 板 = 0x202。
  * 两块板烧同一份代码，只改这一个数字。 */
-#define NODE_ID   0x201u
+#define NODE_ID   0x202u
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -129,9 +129,13 @@ HAL_GPIO_Init(GPIOC, &ledGpio);
 CAN_TxHeaderTypeDef txHeader;
 CAN_RxHeaderTypeDef rxHeader;
 uint32_t txMailbox = 0;
-uint8_t  txData[8] = {0};
 uint8_t  rxData[8] = {0};
-uint8_t  rxCount = 0;   /* 收到「别人」的帧数，放进 txData[2] 作为回显 */
+uint8_t  rxCount = 0;   /* 调试器观察用：等于 rxOk 的低 8 位 */
+uint16_t rxOk  = 0;     /* CRC 通过的帧数 */
+uint16_t rxErr = 0;     /* CRC 失败的帧数 */
+uint8_t  seq   = 0;     /* 发送序号，0~255 循环 */
+uint8_t  payload[5] = {0};
+uint8_t  txBuf[8]   = {0};
 uint16_t cnt = 0;
 
 txHeader.StdId = NODE_ID;
@@ -149,20 +153,34 @@ txHeader.TransmitGlobalTime = DISABLE;
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* 接收：收到「别人」的帧就计数（这块板没有 LED，用回显验证） */
+    /* ---- 接收：CRC 校验 + 计数 ---- */
     if (HAL_CAN_GetRxMessage(&hcan, CAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK)
     {
       if (rxHeader.StdId != NODE_ID)
       {
-        rxCount++;
+        if (cangw_check(rxData))
+        {
+          rxOk++;          /* 校验通过 */
+        }
+        else
+        {
+          rxErr++;         /* 校验失败 */
+        }
       }
     }
+    rxCount = (uint8_t)rxOk;
 
-    txData[0] = (uint8_t)(cnt & 0xFF);
-    txData[1] = (uint8_t)((cnt >> 8) & 0xFF);
-    txData[2] = rxCount;   /* 第 3 字节 = 我收到了多少帧 */
+    /* ---- 发送：组帧 ---- */
+    payload[0] = (uint8_t)(cnt & 0xFF);
+    payload[1] = (uint8_t)((cnt >> 8) & 0xFF);
+    payload[2] = (uint8_t)rxOk;
+    payload[3] = (uint8_t)rxErr;   /* 正常情况下应该一直是 0 */
+    payload[4] = 0;
 
-    if (HAL_CAN_AddTxMessage(&hcan, &txHeader, txData, &txMailbox) == HAL_OK)
+    cangw_pack(txBuf, CANGW_TYPE_DATA, seq, payload);
+    seq++;
+
+    if (HAL_CAN_AddTxMessage(&hcan, &txHeader, txBuf, &txMailbox) == HAL_OK)
     {
       cnt++;
     }
