@@ -410,6 +410,11 @@
               <FilePath>../Core/Src/can.c</FilePath>
             </File>
             <File>
+              <FileName>can_proto.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/can_proto.c</FilePath>
+            </File>
+            <File>
               <FileName>stm32f1xx_it.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/stm32f1xx_it.c</FilePath>
