@@ -35,7 +35,7 @@
 /* USER CODE BEGIN PD */
 /* 节点 ID：A 板 = 0x201，B 板 = 0x202。
  * 两块板烧同一份代码，只改这一个数字。 */
-#define NODE_ID   0x202u
+#define NODE_ID   0x201u
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -139,7 +139,16 @@ uint16_t lostCnt = 0;   /* 累计丢帧数（按 seq 缺口推算） */
 uint16_t reSync  = 0;   /* 对方重启/大跳变次数，不计入丢帧 */
 uint8_t  payload[5] = {0};
 uint8_t  txBuf[8]   = {0};
-uint16_t cnt = 0;
+uint16_t cnt = 0;     /* 已发出的数据帧数 */
+
+/* ---- T8：心跳与离线检测 ---- */
+uint32_t lastRxTick = 0;   /* 上一次收到对方合法帧的时刻（ms） */
+uint32_t lastHbTick = 0;   /* 上一次发心跳的时刻（ms） */
+uint16_t offlineCnt = 0;   /* 进入离线状态的次数（按跳变计，不按秒累加） */
+uint8_t  offline    = 0;   /* 1 = 已经 3 秒没收到对方 */
+uint8_t  hbSeq      = 0;   /* 心跳自己的序号，与数据帧分开 */
+uint8_t  hbPayload[5] = {0};
+uint8_t  hbBuf[8]     = {0};
 
 txHeader.StdId = NODE_ID;
 txHeader.ExtId = 0;
@@ -147,6 +156,13 @@ txHeader.IDE   = CAN_ID_STD;
 txHeader.RTR   = CAN_RTR_DATA;
 txHeader.DLC   = 8;
 txHeader.TransmitGlobalTime = DISABLE;
+
+/* 心跳用独立的 ID：节点号 - 0x100。
+ * A 板数据 0x201 / 心跳 0x101；B 板数据 0x202 / 心跳 0x102。
+ * 分开的好处：PCAN-View 里两类帧各占一行，互不覆盖，
+ * 一眼就能看出"数据在跑但心跳停了"还是"两个都停了"。 */
+CAN_TxHeaderTypeDef hbHeader = txHeader;
+hbHeader.StdId = (uint16_t)(NODE_ID - 0x100u);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -166,7 +182,16 @@ txHeader.TransmitGlobalTime = DISABLE;
       {
         if (cangw_check(rxData))
         {
-          rxOk++;          /* 校验通过 */
+          rxOk++;                     /* 校验通过 */
+          lastRxTick = HAL_GetTick(); /* 收到任何合法帧都说明对方还活着 */
+
+          /* 只有数据帧参与缺口统计。
+           * 心跳走的是另一个 seq，如果混进来会把编号搅乱，
+           * 统计出一堆根本不存在的"丢帧"。 */
+          if (rxData[0] != CANGW_TYPE_DATA)
+          {
+            continue;
+          }
 
           /* ---- 丢帧检测：看序号缺口 ----
            * seq 是 uint8_t，0~255 循环。gap = 本次 - 上次 - 1：
@@ -217,7 +242,8 @@ txHeader.TransmitGlobalTime = DISABLE;
     payload[1] = (uint8_t)((cnt >> 8) & 0xFF);
     payload[2] = (uint8_t)(lostCnt & 0xFF);
     payload[3] = (uint8_t)((lostCnt >> 8) & 0xFF);
-    payload[4] = (uint8_t)rxErr;   /* 正常情况下应该一直是 0 */
+    payload[4] = (uint8_t)((offline ? 0x80u : 0u) |          /* bit7 = 对方离线 */
+                           (rxErr > 0x7Fu ? 0x7Fu : rxErr)); /* bit6..0 = CRC 错次数 */
 
     cangw_pack(txBuf, CANGW_TYPE_DATA, seq, payload);
 
@@ -227,6 +253,50 @@ txHeader.TransmitGlobalTime = DISABLE;
       seq++;      /* 只有真正发出去的帧才占用序号。
                    * 否则发送失败时 seq 空跳，对端会算成漏帧——
                    * 这叫"幻影丢帧"，是自己制造的假故障。 */
+    }
+
+    /* ---- T8：离线判定 + 心跳 ----
+     * 离线判定：距离上次收到合法帧超过 3000 ms 就认为对方离线。
+     * 阈值取心跳周期的 3 倍——丢 1~2 个心跳不至于误判，
+     * 真断了 3 秒内一定能发现。
+     * 注意：这里只记「状态跳变次数」，不按秒累加，
+     * 否则数字会随断电时长乱涨，看不出断过几次。 */
+    {
+      uint32_t age = HAL_GetTick() - lastRxTick;
+
+      if (age > 3000u)
+      {
+        if (offline == 0u)
+        {
+          offline = 1u;
+          offlineCnt++;
+        }
+      }
+      else
+      {
+        offline = 0u;      /* 收到帧立刻恢复在线 */
+      }
+
+      /* 心跳：每秒一帧。它有自己的 seq，和数据帧的缺口统计互不干扰。 */
+      if ((HAL_GetTick() - lastHbTick) >= 1000u)
+      {
+        uint32_t up = HAL_GetTick() / 1000u;
+
+        lastHbTick += 1000u;
+
+        hbPayload[0] = (uint8_t)(up & 0xFF);
+        hbPayload[1] = (uint8_t)((up >> 8) & 0xFF);
+        hbPayload[2] = (uint8_t)(offlineCnt & 0xFF);
+        hbPayload[3] = (uint8_t)((offlineCnt >> 8) & 0xFF);
+        hbPayload[4] = (uint8_t)((offline ? 0x80u : 0u) |
+                                 (rxErr > 0x7Fu ? 0x7Fu : rxErr));
+
+        cangw_pack(hbBuf, CANGW_TYPE_HEARTBEAT, hbSeq, hbPayload);
+        if (HAL_CAN_AddTxMessage(&hcan, &hbHeader, hbBuf, &txMailbox) == HAL_OK)
+        {
+          hbSeq++;
+        }
+      }
     }
 
     HAL_Delay(20);   /* 20 ms = 50 帧/秒 */
