@@ -89,3 +89,35 @@ void cangw_unpack(const uint8_t *buf, cangw_frame_t *frame)
 
     frame->crc = buf[7];
 }
+
+/* ---- CRC-32（CRC-32/ISO-HDLC）----
+ * 多项式 0x04C11DB7（反射写法 0xEDB88320），初值 0xFFFFFFFF，结果异或 0xFFFFFFFF。
+ * 逐位实现，1 KB 只要几毫秒，不值得为它建 256 项查表。
+ *
+ * 注意：这是**整包校验**，和每帧的 CRC8 是两回事。
+ * 单帧 CRC8 只保证"这一帧没被破坏"；
+ * 整包 CRC32 保证"172 帧拼起来之后还是原来那 1 KB"。 */
+uint32_t cangw_crc32(const uint8_t *data, uint16_t len)
+{
+    uint32_t crc = 0xFFFFFFFFu;
+    uint16_t i;
+    uint8_t  b;
+
+    for (i = 0u; i < len; i++)
+    {
+        crc ^= (uint32_t)data[i];
+        for (b = 0u; b < 8u; b++)
+        {
+            if (crc & 1u)
+            {
+                crc = (crc >> 1) ^ 0xEDB88320u;
+            }
+            else
+            {
+                crc >>= 1;
+            }
+        }
+    }
+
+    return crc ^ 0xFFFFFFFFu;
+}

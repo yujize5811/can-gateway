@@ -43,6 +43,18 @@
 #define CANGW_TYPE_BLOCK      0x40u
 #define CANGW_TYPE_ACK        0x50u
 
+/* ---- 多帧块传输（T5）----
+ * 一个 1 KB 的块拆成：1 个 START + 256 个 FRAG + 1 个 END，共 258 帧。
+ * 每帧只带 4 字节数据——因为 8 字节的帧里，type、seq、fragIdx、crc8
+ * 各占一个字节，剩下正好 4 个。
+ * 车道放在 0x3xx（A 板 0x301 / B 板 0x302），和数据 0x2xx 分开，
+ * 免得两类帧在 PCAN-View 里互相覆盖。 */
+#define CANGW_TYPE_BLK_START  0x3Fu
+#define CANGW_TYPE_BLK_FRAG   0x40u
+#define CANGW_TYPE_BLK_END    0x41u
+
+#define CANGW_BLK_CHUNK       4u      /* 每帧携带的数据字节数 */
+
 /* 节点 ID：0x200 + 节点号 */
 #define CANGW_ID_BASE       0x200u
 
@@ -55,6 +67,9 @@ typedef struct
 } cangw_frame_t;
 
 uint8_t cangw_crc8(const uint8_t *data, uint8_t len);
+
+/* 整包校验：1 KB 数据的 CRC32，用于多帧重组的完整性判断 */
+uint32_t cangw_crc32(const uint8_t *data, uint16_t len);
 
 void cangw_pack(uint8_t *buf, uint8_t type, uint8_t seq, const uint8_t *payload);
 

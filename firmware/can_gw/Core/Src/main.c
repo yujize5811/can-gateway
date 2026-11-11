@@ -35,7 +35,7 @@
 /* USER CODE BEGIN PD */
 /* 节点 ID：A 板 = 0x201，B 板 = 0x202。
  * 两块板烧同一份代码，只改这一个数字。 */
-#define NODE_ID   0x201u
+#define NODE_ID   0x202u
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -163,6 +163,47 @@ txHeader.TransmitGlobalTime = DISABLE;
  * 一眼就能看出"数据在跑但心跳停了"还是"两个都停了"。 */
 CAN_TxHeaderTypeDef hbHeader = txHeader;
 hbHeader.StdId = (uint16_t)(NODE_ID - 0x100u);
+
+/* ---- T5：多帧块传输（1 KB）----
+ * 发送端：START（带总长）→ 256 个 FRAG（4 字节/帧）→ END（带整包 CRC32）
+ * 接收端：按 fragIdx 往 blkRxBuf 里填，END 到了再算一遍 CRC32 对比。
+ * 三个类型走独立的 0x3xx 车道，和数据 0x2xx 分开。 */
+#define BLK_LEN      1024u
+#define BLK_FRAMES   (BLK_LEN / CANGW_BLK_CHUNK)   /* 256 */
+
+CAN_TxHeaderTypeDef blkHeader = txHeader;
+blkHeader.StdId = (uint16_t)(NODE_ID + 0x100u);   /* A 0x301 / B 0x302 */
+
+uint8_t  blkBuf[8]     = {0};
+uint8_t  blkPayload[5] = {0};
+
+/* 发送侧 */
+static uint8_t blkTxBuf[BLK_LEN] = {0};   /* 待发的 1 KB —— 必须 static，
+                                           * 放栈上会直接爆掉默认 1 KB 的栈 */
+uint8_t  blkActive  = 0;            /* 1 = 正在发这个块 */
+uint16_t blkTxIdx   = 0;            /* 下一个要发的分片号 */
+uint32_t blkNextAt  = 0;            /* 下一次开始传输的时刻 */
+uint8_t  blkId      = 0;            /* 块编号，每传完一次 +1 */
+uint8_t  blkSeq     = 0;            /* 块帧自己的序号 */
+uint32_t blkCrcTx   = 0;
+
+/* 接收侧 */
+static uint8_t blkRxBuf[BLK_LEN] = {0};   /* 同样必须 static */
+uint8_t  blkRxActive = 0;
+uint8_t  blkRxId     = 0;
+uint16_t blkRxLen    = 0;
+uint16_t blkRxExpect = 0;           /* 期望的下一个分片号 */
+uint16_t blkRxGot    = 0;           /* 实际收到多少个分片 */
+uint16_t blkOkCnt    = 0;           /* 整包校验通过的次数 */
+uint16_t blkFailCnt  = 0;           /* 整包校验失败的次数 */
+
+/* ACK 帧：整包校验完立刻回一帧，把结果摊在 PCAN-View 上。
+ * 走 0x5xx 车道（A 0x501 / B 0x502），和数据、块传输都分开。 */
+CAN_TxHeaderTypeDef ackHeader = txHeader;
+uint8_t  ackPayload[5] = {0};
+uint8_t  ackBuf[8]     = {0};
+uint8_t  ackSeq        = 0;
+ackHeader.StdId = (uint16_t)(NODE_ID + 0x300u);   /* A 0x501 / B 0x502 */
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -184,6 +225,74 @@ hbHeader.StdId = (uint16_t)(NODE_ID - 0x100u);
         {
           rxOk++;                     /* 校验通过 */
           lastRxTick = HAL_GetTick(); /* 收到任何合法帧都说明对方还活着 */
+
+          /* ---- T5：块传输的三个分支 ---- */
+          if (rxData[0] == CANGW_TYPE_BLK_START)
+          {
+            blkRxActive = 1u;
+            blkRxId     = rxData[2];
+            blkRxLen    = (uint16_t)(((uint16_t)rxData[3] << 8) | rxData[4]);
+            blkRxExpect = 0u;
+            blkRxGot    = 0u;
+            continue;
+          }
+
+          if (rxData[0] == CANGW_TYPE_BLK_FRAG)
+          {
+            uint16_t idx = rxData[2];
+            uint16_t off = (uint16_t)(idx * CANGW_BLK_CHUNK);
+            uint8_t  k;
+
+            /* 只接受"期望中的那一片"。乱序或重复都丢掉——
+             * 先做最笨的版本，等做到 T6 滑窗再放宽容错。 */
+            if ((blkRxActive != 0u) && (idx == blkRxExpect) && (off + CANGW_BLK_CHUNK <= BLK_LEN))
+            {
+              for (k = 0u; k < CANGW_BLK_CHUNK; k++)
+              {
+                blkRxBuf[off + k] = rxData[3u + k];
+              }
+              blkRxExpect++;
+              blkRxGot++;
+            }
+            continue;
+          }
+
+          if (rxData[0] == CANGW_TYPE_BLK_END)
+          {
+            if (blkRxActive != 0u)
+            {
+              uint32_t want = ((uint32_t)rxData[2] << 24) | ((uint32_t)rxData[3] << 16) |
+                              ((uint32_t)rxData[4] << 8)  |  (uint32_t)rxData[5];
+              uint32_t got  = cangw_crc32(blkRxBuf, blkRxLen);
+
+              if (got == want)
+              {
+                blkOkCnt++;          /* 整包校验通过 */
+              }
+              else
+              {
+                blkFailCnt++;        /* 拼起来的和发出来的不是一份 */
+              }
+
+              /* 立刻回一帧 ACK，把结果摊到 PCAN-View 上：
+               *   D0 = 块编号    D1 = 0 通过 / 1 失败
+               *   D2D3 = 实际收到多少片（小端）   D4 = 累计通过次数 */
+              ackPayload[0] = blkRxId;
+              ackPayload[1] = (got == want) ? 0u : 1u;
+              ackPayload[2] = (uint8_t)(blkRxGot & 0xFFu);
+              ackPayload[3] = (uint8_t)((blkRxGot >> 8) & 0xFFu);
+              ackPayload[4] = (uint8_t)(blkOkCnt > 0x7Fu ? 0x7Fu : blkOkCnt);
+
+              cangw_pack(ackBuf, CANGW_TYPE_ACK, ackSeq, ackPayload);
+              if (HAL_CAN_AddTxMessage(&hcan, &ackHeader, ackBuf, &txMailbox) == HAL_OK)
+              {
+                ackSeq++;
+              }
+
+              blkRxActive = 0u;
+            }
+            continue;
+          }
 
           /* 只有数据帧参与缺口统计。
            * 心跳走的是另一个 seq，如果混进来会把编号搅乱，
@@ -295,6 +404,78 @@ hbHeader.StdId = (uint16_t)(NODE_ID - 0x100u);
         if (HAL_CAN_AddTxMessage(&hcan, &hbHeader, hbBuf, &txMailbox) == HAL_OK)
         {
           hbSeq++;
+        }
+      }
+    }
+
+    /* ---- T5：多帧块传输（发 1 KB）----
+     * 节奏：每轮循环只发一个块帧（20 ms 一个），所以 258 帧大约 5.4 秒传完。
+     * 这是"连发"版本，没有逐帧 ACK，靠最后的 CRC32 判整包对错。
+     * 等 T6 把停等 / 滑窗做完，再回来对比耗时。 */
+    {
+      uint32_t now = HAL_GetTick();
+
+      if ((blkActive == 0u) && ((now - blkNextAt) >= 5000u))
+      {
+        uint16_t i;
+
+        blkId++;
+        for (i = 0u; i < BLK_LEN; i++)
+        {
+          blkTxBuf[i] = (uint8_t)((i * 7u) + blkId);   /* 可预测，便于对拍 */
+        }
+        blkCrcTx  = cangw_crc32(blkTxBuf, BLK_LEN);
+        blkTxIdx  = 0u;
+        blkSeq    = 0u;
+        blkActive = 1u;
+
+        blkPayload[0] = blkId;
+        blkPayload[1] = (uint8_t)((BLK_LEN >> 8) & 0xFFu);
+        blkPayload[2] = (uint8_t)(BLK_LEN & 0xFFu);
+        blkPayload[3] = 0u;
+        blkPayload[4] = 0u;
+
+        cangw_pack(blkBuf, CANGW_TYPE_BLK_START, blkSeq, blkPayload);
+        if (HAL_CAN_AddTxMessage(&hcan, &blkHeader, blkBuf, &txMailbox) == HAL_OK)
+        {
+          blkSeq++;
+        }
+      }
+      else if (blkActive != 0u)
+      {
+        if (blkTxIdx < BLK_FRAMES)
+        {
+          uint16_t off = (uint16_t)(blkTxIdx * CANGW_BLK_CHUNK);
+
+          blkPayload[0] = (uint8_t)(blkTxIdx & 0xFFu);
+          blkPayload[1] = blkTxBuf[off + 0u];
+          blkPayload[2] = blkTxBuf[off + 1u];
+          blkPayload[3] = blkTxBuf[off + 2u];
+          blkPayload[4] = blkTxBuf[off + 3u];
+
+          cangw_pack(blkBuf, CANGW_TYPE_BLK_FRAG, blkSeq, blkPayload);
+          if (HAL_CAN_AddTxMessage(&hcan, &blkHeader, blkBuf, &txMailbox) == HAL_OK)
+          {
+            blkSeq++;
+            blkTxIdx++;
+          }
+        }
+        else
+        {
+          /* 所有分片发完 → 发 END，带上整包 CRC32（大端 4 字节） */
+          blkPayload[0] = (uint8_t)((blkCrcTx >> 24) & 0xFFu);
+          blkPayload[1] = (uint8_t)((blkCrcTx >> 16) & 0xFFu);
+          blkPayload[2] = (uint8_t)((blkCrcTx >> 8)  & 0xFFu);
+          blkPayload[3] = (uint8_t)( blkCrcTx        & 0xFFu);
+          blkPayload[4] = 0u;
+
+          cangw_pack(blkBuf, CANGW_TYPE_BLK_END, blkSeq, blkPayload);
+          if (HAL_CAN_AddTxMessage(&hcan, &blkHeader, blkBuf, &txMailbox) == HAL_OK)
+          {
+            blkSeq++;
+            blkActive = 0u;
+            blkNextAt = now;      /* 从这一刻起，5 秒后再传下一包 */
+          }
         }
       }
     }
