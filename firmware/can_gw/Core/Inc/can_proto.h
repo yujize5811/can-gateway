@@ -52,6 +52,7 @@
 #define CANGW_TYPE_BLK_START  0x3Fu
 #define CANGW_TYPE_BLK_FRAG   0x40u
 #define CANGW_TYPE_BLK_END    0x41u
+#define CANGW_TYPE_BLK_NAK    0x51u   /* T6：缺片请求重传（回退 N 帧） */
 
 #define CANGW_BLK_CHUNK       4u      /* 每帧携带的数据字节数 */
 

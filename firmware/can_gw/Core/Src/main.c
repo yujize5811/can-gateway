@@ -200,10 +200,20 @@ uint16_t blkFailCnt  = 0;           /* 整包校验失败的次数 */
 /* ACK 帧：整包校验完立刻回一帧，把结果摊在 PCAN-View 上。
  * 走 0x5xx 车道（A 0x501 / B 0x502），和数据、块传输都分开。 */
 CAN_TxHeaderTypeDef ackHeader = txHeader;
+CAN_TxHeaderTypeDef nakHeader = txHeader;
 uint8_t  ackPayload[5] = {0};
 uint8_t  ackBuf[8]     = {0};
+
+/* ---- T6：NACK（缺片请求重传，回退 N 帧） ---- */
+uint8_t  nakPayload[5] = {0};
+uint8_t  nakBuf[8]     = {0};
+uint8_t  nakSeq        = 0;
+uint16_t nakCnt        = 0;      /* 本机总共发出过多少次 NACK */
+uint32_t nakLastTick   = 0;      /* 上次发 NACK 的时刻，用于限速 */
+uint16_t blkRetryCnt   = 0;      /* 本机作为发送端，被要求重传的次数 */
 uint8_t  ackSeq        = 0;
 ackHeader.StdId = (uint16_t)(NODE_ID + 0x300u);   /* A 0x501 / B 0x502 */
+nakHeader.StdId = (uint16_t)(NODE_ID + 0x400u);   /* A 0x601 / B 0x602 */
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -237,6 +247,24 @@ ackHeader.StdId = (uint16_t)(NODE_ID + 0x300u);   /* A 0x501 / B 0x502 */
             continue;
           }
 
+          if (rxData[0] == CANGW_TYPE_BLK_NAK)
+          {
+            /* 对方说：我缺片了，从我那个 startIdx 开始重发。
+             * 我们这边作为发送端，把发送指针退回去即可 —— 这就是
+             * Go-Back-N 的全部实现：不做选择重传，退回去全发一遍。 */
+            if ((blkActive != 0u) && (rxData[2] == blkId))
+            {
+              uint16_t start = rxData[3];
+
+              if (start < BLK_FRAMES)
+              {
+                blkTxIdx = start;      /* 回退发送指针 */
+                blkRetryCnt++;
+              }
+            }
+            continue;
+          }
+
           if (rxData[0] == CANGW_TYPE_BLK_FRAG)
           {
             uint16_t idx = rxData[2];
@@ -253,6 +281,34 @@ ackHeader.StdId = (uint16_t)(NODE_ID + 0x300u);   /* A 0x501 / B 0x502 */
               }
               blkRxExpect++;
               blkRxGot++;
+            }
+            else if ((blkRxActive != 0u) && (idx > blkRxExpect))
+            {
+              /* 序号往前跳了 —— 中间那几片没收到。
+               * 回一帧 NACK，请对端从 blkRxExpect 开始重发。
+               *
+               * 为什么必须限速：对端每次重发都会再次触发这个判断，
+               * 不限速就会「NACK 刷屏 + FRAG 重发」互相叠加，
+               * 总线瞬间打满，比不重传还糟。50 ms 是经验值：
+               * 一帧 FRAG 只要 0.23 ms，50 ms 足够对端发完 200 多帧。 */
+              uint32_t nakNow = HAL_GetTick();
+
+              if ((nakNow - nakLastTick) >= 50u)
+              {
+                nakPayload[0] = blkRxId;
+                nakPayload[1] = (uint8_t)(blkRxExpect & 0xFFu);
+                nakPayload[2] = 0u;
+                nakPayload[3] = 0u;
+                nakPayload[4] = (uint8_t)(nakCnt & 0xFFu);
+
+                cangw_pack(nakBuf, CANGW_TYPE_BLK_NAK, nakSeq, nakPayload);
+                if (HAL_CAN_AddTxMessage(&hcan, &nakHeader, nakBuf, &txMailbox) == HAL_OK)
+                {
+                  nakSeq++;
+                  nakCnt++;
+                  nakLastTick = nakNow;
+                }
+              }
             }
             continue;
           }
