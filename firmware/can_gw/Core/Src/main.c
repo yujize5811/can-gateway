@@ -35,7 +35,7 @@
 /* USER CODE BEGIN PD */
 /* 节点 ID：A 板 = 0x201，B 板 = 0x202。
  * 两块板烧同一份代码，只改这一个数字。 */
-#define NODE_ID   0x202u
+#define NODE_ID   0x201u
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -149,6 +149,11 @@ uint8_t  offline    = 0;   /* 1 = 已经 3 秒没收到对方 */
 uint8_t  hbSeq      = 0;   /* 心跳自己的序号，与数据帧分开 */
 uint8_t  hbPayload[5] = {0};
 uint8_t  hbBuf[8]     = {0};
+
+/* ---- T7：Bus-Off 检测 ---- */
+uint16_t busOffCnt  = 0;   /* 进入 Bus-Off 的次数（按 0->1 跳变计，不按轮数累加） */
+uint8_t  busOffLast = 0;   /* 上一轮读到的 BOFF 位 */
+uint8_t  busOffNow  = 0;   /* 本轮读到的 BOFF 位 */
 
 txHeader.StdId = NODE_ID;
 txHeader.ExtId = 0;
@@ -451,10 +456,10 @@ nakHeader.StdId = (uint16_t)(NODE_ID + 0x400u);   /* A 0x601 / B 0x602 */
 
         hbPayload[0] = (uint8_t)(up & 0xFF);
         hbPayload[1] = (uint8_t)((up >> 8) & 0xFF);
-        hbPayload[2] = (uint8_t)(offlineCnt & 0xFF);
-        hbPayload[3] = (uint8_t)((offlineCnt >> 8) & 0xFF);
-        hbPayload[4] = (uint8_t)((offline ? 0x80u : 0u) |
-                                 (rxErr > 0x7Fu ? 0x7Fu : rxErr));
+        hbPayload[2] = (uint8_t)((CAN1->ESR >> 16) & 0xFF);  /* 临时诊断：TEC 发送错误计数 */
+        hbPayload[3] = (uint8_t)(busOffCnt  & 0xFF);  /* 让出的那一字节放 Bus-Off 次数 */
+        hbPayload[4] = (uint8_t)((offline   != 0u ? 0x80u : 0u) |   /* bit7 当前是否离线 */
+                                 (busOffNow != 0u ? 0x40u : 0u));   /* bit6 当前是否 Bus-Off */
 
         cangw_pack(hbBuf, CANGW_TYPE_HEARTBEAT, hbSeq, hbPayload);
         if (HAL_CAN_AddTxMessage(&hcan, &hbHeader, hbBuf, &txMailbox) == HAL_OK)
@@ -535,6 +540,26 @@ nakHeader.StdId = (uint16_t)(NODE_ID + 0x400u);   /* A 0x601 / B 0x602 */
         }
       }
     }
+
+    /* ---- T7：Bus-Off 检测 ----
+     * CAN1->ESR 的 bit2 = BOFF：进 Bus-Off 时硬件置 1，恢复后自动清 0。
+     * 只在 0->1 的跳变时计数 —— 如果数"当前是不是 1"，Bus-Off 持续 100 轮
+     * 就会被记成进了 100 次。 */
+    busOffNow = (uint8_t)((CAN1->ESR >> 2) & 1u);
+    if ((busOffNow != 0u) && (busOffLast == 0u))
+    {
+      busOffCnt++;
+
+      /* T7：恢复。
+       * ABOM 关掉以后，硬件不会自己回来，必须由软件把 CAN 控制器
+       * 重新拉回正常模式。HAL_CAN_Start() 内部会清 INRQ 位，
+       * 等价于"请求退出初始化模式"，控制器重新参与总线。
+       * 备注：这里只做"恢复动作"，恢复成功与否由下一轮 ESR 判断。 */
+      (void)HAL_CAN_Start(&hcan);
+
+      /* 恢复后原来的过滤器仍在，不需要重新配置。 */
+    }
+    busOffLast = busOffNow;
 
     HAL_Delay(20);   /* 20 ms = 50 帧/秒 */
   }

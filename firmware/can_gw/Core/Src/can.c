@@ -44,7 +44,9 @@ void MX_CAN_Init(void)
   hcan.Init.TimeSeg1 = CAN_BS1_6TQ;
   hcan.Init.TimeSeg2 = CAN_BS2_2TQ;
   hcan.Init.TimeTriggeredMode = DISABLE;
-  hcan.Init.AutoBusOff = ENABLE;
+  hcan.Init.AutoBusOff = DISABLE;   /* ABOM 关掉：进 Bus-Off 后保持，由软件决定何时恢复。
+                                     * 开着的话硬件会在 128×11 个隐性位（500 kbps 约 0.28 ms）
+                                     * 后自动恢复，BOFF 位只维持一瞬间，20 ms 轮询根本抓不到。 */
   hcan.Init.AutoWakeUp = DISABLE;
   hcan.Init.AutoRetransmission = ENABLE;
   hcan.Init.ReceiveFifoLocked = DISABLE;
