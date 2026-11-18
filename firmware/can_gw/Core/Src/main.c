@@ -456,7 +456,7 @@ nakHeader.StdId = (uint16_t)(NODE_ID + 0x400u);   /* A 0x601 / B 0x602 */
 
         hbPayload[0] = (uint8_t)(up & 0xFF);
         hbPayload[1] = (uint8_t)((up >> 8) & 0xFF);
-        hbPayload[2] = (uint8_t)((CAN1->ESR >> 16) & 0xFF);  /* 临时诊断：TEC 发送错误计数 */
+        hbPayload[2] = (uint8_t)(offlineCnt & 0xFF);  /* 离线次数只发低 8 位 */
         hbPayload[3] = (uint8_t)(busOffCnt  & 0xFF);  /* 让出的那一字节放 Bus-Off 次数 */
         hbPayload[4] = (uint8_t)((offline   != 0u ? 0x80u : 0u) |   /* bit7 当前是否离线 */
                                  (busOffNow != 0u ? 0x40u : 0u));   /* bit6 当前是否 Bus-Off */
