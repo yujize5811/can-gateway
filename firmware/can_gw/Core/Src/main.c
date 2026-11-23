@@ -35,7 +35,7 @@
 /* USER CODE BEGIN PD */
 /* 节点 ID：A 板 = 0x201，B 板 = 0x202。
  * 两块板烧同一份代码，只改这一个数字。 */
-#define NODE_ID   0x201u
+#define NODE_ID   0x202u
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -175,6 +175,12 @@ hbHeader.StdId = (uint16_t)(NODE_ID - 0x100u);
  * 三个类型走独立的 0x3xx 车道，和数据 0x2xx 分开。 */
 #define BLK_LEN      1024u
 #define BLK_FRAMES   (BLK_LEN / CANGW_BLK_CHUNK)   /* 256 */
+
+/* 每轮主循环最多发几个分片。
+ * 1 = 停等（每 20 ms 一片，256 片约 5.1 秒）
+ * 4 = 滑窗（每 20 ms 四片，256 片约 1.3 秒）
+ * 测耗时对照就改这一个数字，其余代码不动。 */
+#define BLK_WINDOW   4u
 
 CAN_TxHeaderTypeDef blkHeader = txHeader;
 blkHeader.StdId = (uint16_t)(NODE_ID + 0x100u);   /* A 0x301 / B 0x302 */
@@ -504,24 +510,35 @@ nakHeader.StdId = (uint16_t)(NODE_ID + 0x400u);   /* A 0x601 / B 0x602 */
       }
       else if (blkActive != 0u)
       {
-        if (blkTxIdx < BLK_FRAMES)
+        /* 窗口发送：一轮最多发 BLK_WINDOW 片。
+         * 原来的写法是"每轮只发一片"（等于停等），改成一个 for 循环
+         * 就是滑窗——两者只差一个数字，其余代码完全一样。 */
         {
-          uint16_t off = (uint16_t)(blkTxIdx * CANGW_BLK_CHUNK);
-
-          blkPayload[0] = (uint8_t)(blkTxIdx & 0xFFu);
-          blkPayload[1] = blkTxBuf[off + 0u];
-          blkPayload[2] = blkTxBuf[off + 1u];
-          blkPayload[3] = blkTxBuf[off + 2u];
-          blkPayload[4] = blkTxBuf[off + 3u];
-
-          cangw_pack(blkBuf, CANGW_TYPE_BLK_FRAG, blkSeq, blkPayload);
-          if (HAL_CAN_AddTxMessage(&hcan, &blkHeader, blkBuf, &txMailbox) == HAL_OK)
+          uint8_t win;
+          for (win = 0u; (win < BLK_WINDOW) && (blkTxIdx < BLK_FRAMES); win++)
           {
-            blkSeq++;
-            blkTxIdx++;
+            uint16_t off = (uint16_t)(blkTxIdx * CANGW_BLK_CHUNK);
+
+            blkPayload[0] = (uint8_t)(blkTxIdx & 0xFFu);
+            blkPayload[1] = blkTxBuf[off + 0u];
+            blkPayload[2] = blkTxBuf[off + 1u];
+            blkPayload[3] = blkTxBuf[off + 2u];
+            blkPayload[4] = blkTxBuf[off + 3u];
+
+            cangw_pack(blkBuf, CANGW_TYPE_BLK_FRAG, blkSeq, blkPayload);
+            if (HAL_CAN_AddTxMessage(&hcan, &blkHeader, blkBuf, &txMailbox) == HAL_OK)
+            {
+              blkSeq++;
+              blkTxIdx++;
+            }
+            else
+            {
+              break;      /* 邮箱满：剩下的下一轮再发，不丢片 */
+            }
           }
         }
-        else
+
+        if (blkTxIdx >= BLK_FRAMES)
         {
           /* 所有分片发完 → 发 END，带上整包 CRC32（大端 4 字节） */
           blkPayload[0] = (uint8_t)((blkCrcTx >> 24) & 0xFFu);
