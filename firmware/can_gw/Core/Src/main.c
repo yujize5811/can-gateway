@@ -35,7 +35,7 @@
 /* USER CODE BEGIN PD */
 /* 节点 ID：A 板 = 0x201，B 板 = 0x202。
  * 两块板烧同一份代码，只改这一个数字。 */
-#define NODE_ID   0x202u
+#define NODE_ID   0x201u
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -181,6 +181,13 @@ hbHeader.StdId = (uint16_t)(NODE_ID - 0x100u);
  * 4 = 滑窗（每 20 ms 四片，256 片约 1.3 秒）
  * 测耗时对照就改这一个数字，其余代码不动。 */
 #define BLK_WINDOW   4u
+
+/* T3 灌包实验开关：1 = 上电后前 60 秒 A 板全速发帧（测总线负载上限）；
+ * 正常演示/压测时保持 0。 */
+#define BURST_TEST   1u
+/* 灌包节拍：0 = 不歇，让发送邮箱决定节奏（≈总线上限实验）
+ *           1/2 = 每轮歇 1~2 ms（≈负载实验，1 ms 量化后约 2.1 ms） */
+#define BURST_PACE_MS  0u
 
 CAN_TxHeaderTypeDef blkHeader = txHeader;
 blkHeader.StdId = (uint16_t)(NODE_ID + 0x100u);   /* A 0x301 / B 0x302 */
@@ -403,6 +410,40 @@ nakHeader.StdId = (uint16_t)(NODE_ID + 0x400u);   /* A 0x601 / B 0x602 */
       }
     }
     rxCount = (uint8_t)rxOk;
+
+    /* ---- T3 灌包：上电后前 60 秒，A 板以尽可能快的速度发数据帧 ----
+     * 目的：把总线负载顶到 40% 以上，看会不会出现错误帧/丢帧。
+     * 只让 A 板（0x201）灌，B 板保持正常 21 ms 节拍，这样能同时观察
+     * "被灌的那一方"还收不收得到东西。60 秒后自动回到正常模式。 */
+#if BURST_TEST
+    if ((NODE_ID == 0x201u) && (HAL_GetTick() < 300000u))
+    {
+      uint8_t bk;
+      for (bk = 0u; bk < 3u; bk++)
+      {
+        payload[0] = (uint8_t)(cnt & 0xFFu);
+        payload[1] = (uint8_t)((cnt >> 8) & 0xFFu);
+        payload[2] = (uint8_t)(lostCnt & 0xFFu);
+        payload[3] = (uint8_t)((lostCnt >> 8) & 0xFFu);
+        payload[4] = (uint8_t)rxErr;
+
+        cangw_pack(txBuf, CANGW_TYPE_DATA, seq, payload);
+        if (HAL_CAN_AddTxMessage(&hcan, &txHeader, txBuf, &txMailbox) == HAL_OK)
+        {
+          cnt++;
+          seq++;
+        }
+        else
+        {
+          break;      /* 邮箱满：这轮不发了 */
+        }
+      }
+#if (BURST_PACE_MS > 0u)
+      HAL_Delay(BURST_PACE_MS);   /* 每轮之后歇一下，控制负载 */
+#endif
+      continue;       /* 跳过本轮其余逻辑，全力灌包 */
+    }
+#endif
 
     /* ---- 发送：组帧 ----
      * 帧布局（8 字节）：
